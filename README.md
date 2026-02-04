@@ -1,78 +1,76 @@
-# grater-basics
-Setup Instructions
-Prerequisites
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+</head>
+<body>
 
-You need:
+<h1>grater-basics</h1>
 
-Go ≥ 1.21
+<h2>Setup Instructions</h2>
 
-Docker
+<h3>Prerequisites</h3>
+<p>You need:</p>
+<ul>
+  <li>Go ≥ 1.21</li>
+  <li>Docker</li>
+  <li>Git</li>
+</ul>
 
-Git
+<h2>Install grater (from source)</h2>
 
-Install grater (from source)
+<p>Clone the repo:</p>
+<pre><code>git clone https://github.com/amishhaa/grater-basics.git
+cd grater-basics</code></pre>
 
-Clone the repo:
+<p>Build and install the CLI:</p>
+<pre><code>go install ./cmd/grater</code></pre>
 
-git clone https://github.com/amishhaa/grater-basics.git
-cd grater-basics
+<p>Make sure $GOPATH/bin is in your PATH:</p>
+<pre><code>echo $PATH | grep go/bin</code></pre>
 
+<pre><code>grater --help</code></pre>
 
-Build and install the CLI:
+<h2>Workspace</h2>
 
-go install ./cmd/grater
+<p>grater uses a local workspace directory:</p>
+<pre><code>.grater/</code></pre>
 
+<p>This is created automatically when you run:</p>
+<pre><code>grater prepare</code></pre>
 
-Make sure $GOPATH/bin is in your PATH:
+<p>It stores:</p>
+<ul>
+  <li>modules.txt → list of downstream modules (Currently the functionality to fetch modules is not yet implemented)</li>
+  <li>results.json → test results (when grater run is executed)</li>
+</ul>
 
-echo $PATH | grep go/bin
+<h2>Usage</h2>
 
-grater --help
+<h3>1. Prepare downstream modules</h3>
+<pre><code>grater prepare</code></pre>
 
-Workspace
+<p>Creates:</p>
+<pre><code>.grater/modules.txt</code></pre>
 
-grater uses a local workspace directory:
-
-.grater/
-
-
-This is created automatically when you run:
-
-grater prepare
-
-
-It stores:
-
-modules.txt → list of downstream modules (Currently the functionality to fetch modules is not yet implemented)
-
-results.json → test results (when grater run is executed)
-
-Usage
-1. Prepare downstream modules
-grater prepare
-
-
-Creates:
-
-.grater/modules.txt
-
-2. Run tests //basic run functionality, currently heavily in development
-grater run \
+<h3>2. Run tests //basic run functionality, currently heavily in development</h3>
+<pre><code>grater run \
   --repo github.com/open-telemetry/opentelemetry-go \
   --base main \
-  --head HEAD
+  --head HEAD</code></pre>
 
-3. View report (not implemented yet)
-grater report
+<h3>3. View report (not implemented yet)</h3>
+<pre><code>grater report</code></pre>
 
-Docker runner
+<h2>Docker runner</h2>
 
-Build the runner image:
+<p>Build the runner image:</p>
+<pre><code>docker build -t grater-runner -f docker/Dockerfile .</code></pre>
 
-docker build -t grater-runner -f docker/Dockerfile .
+<h2>Quick Start</h2>
+<pre><code>go install ./cmd/grater
+docker build -t grater-runner -f docker/Dockerfile .</code></pre>
 
+</body>
+</html>
 
-## Quick Start
-
-go install ./cmd/grater
-docker build -t grater-runner -f docker/Dockerfile .
