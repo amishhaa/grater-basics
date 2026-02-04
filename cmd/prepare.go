@@ -1,11 +1,9 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -13,28 +11,34 @@ import (
 // prepareCmd represents the prepare command
 var prepareCmd = &cobra.Command{
 	Use:   "prepare",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+	Short: "Prepare grater workspace",
+	Long:  "Creates a .grater directory and generates required files",
+	RunE: func(cmd *cobra.Command, args []string) error {
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("prepare called")
+		// 1. Create .grater directory
+		wsDir := ".grater"
+		err := os.MkdirAll(wsDir, 0755)
+		if err != nil {
+			return err
+		}
+
+		// 2. Create modules.txt inside .grater
+		modulesPath := filepath.Join(wsDir, "modules.txt")
+
+		content := []byte("moduleA\nmoduleB\nmoduleC\n")
+
+		err = os.WriteFile(modulesPath, content, 0644)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("✅ .grater workspace created")
+		fmt.Println("✅ modules.txt generated at", modulesPath)
+
+		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(prepareCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// prepareCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// prepareCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
