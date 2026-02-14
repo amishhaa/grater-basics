@@ -11,8 +11,6 @@ import (
 )
 
 var limit int
-// DO NOT redeclare repo if it's already in run.go
-// var repo string   <-- remove this
 
 var findCmd = &cobra.Command{
 	Use:   "find",

@@ -19,13 +19,10 @@ func LoadModules(limit int, repo string) ([]string, error) {
 		repo = strings.TrimSpace(string(out))
 	}
 	repo = cleanRepoURL(repo)
-	// You can hardcode a version or append it if needed, 
-	// but pkg.go.dev usually redirects to the latest if omitted.
 	return FetchFromPkgGoDev(limit, repo)
 }
 
 func FetchFromPkgGoDev(limit int, module string) ([]string, error) {
-	// The URL for the "Imported By" tab
 	url := fmt.Sprintf("https://pkg.go.dev/%s?tab=importedby", module)
 
 	resp, err := http.Get(url)
@@ -38,15 +35,12 @@ func FetchFromPkgGoDev(limit int, module string) ([]string, error) {
 		return nil, fmt.Errorf("pkg.go.dev returned status: %s", resp.Status)
 	}
 
-	// Load the HTML document
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []string
-	// pkg.go.dev stores the dependents in <a> tags within the 
-	// .ImportedBy-details section (this selector may change if they update their UI)
 	doc.Find(".ImportedBy-details a").Each(func(i int, s *goquery.Selection) {
 		if limit > 0 && len(results) >= limit {
 			return
@@ -60,7 +54,6 @@ func FetchFromPkgGoDev(limit int, module string) ([]string, error) {
 	return results, nil
 }
 
-// ... keep your cleanRepoURL function ...
 func cleanRepoURL(url string) string {
 	url = strings.TrimSuffix(url, ".git")
 	url = strings.TrimPrefix(url, "https://")
