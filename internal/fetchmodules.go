@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -18,7 +19,15 @@ type moduleInfo struct {
 	Score float64 `json:"score"`
 }
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// Create a custom transport with proper settings for concurrent requests
+var httpClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 func LoadModules(limit int, repo string) ([]string, error) {
 	if repo == "" {
@@ -29,28 +38,10 @@ func LoadModules(limit int, repo string) ([]string, error) {
 		repo = strings.TrimSpace(string(out))
 	}
 	repo = cleanRepoURL(repo)
-	
-	importers, err := findImporters(repo)
-	if err != nil {
-		return nil, err
-	}
-	
-	if len(importers) == 0 {
-		fmt.Println("⚠️ No importers found for this module")
-		return []string{}, nil
-	}
-	
-	return rankProjectsSequential(importers, limit)
+	return FetchAndRankWithScorecard(limit, repo)
 }
 
-func ScoreProjects(projects []string, limit int) ([]string, error) {
-	if len(projects) == 0 {
-		return []string{}, nil
-	}
-	return rankProjectsSequential(projects, limit)
-}
-
-func findImporters(module string) ([]string, error) {
+func FetchAndRankWithScorecard(limit int, module string) ([]string, error) {
 	fmt.Printf("🔍 Fetching importers for: %s\n", module)
 	url := fmt.Sprintf("https://pkg.go.dev/%s?tab=importedby", module)
 
@@ -80,29 +71,29 @@ func findImporters(module string) ([]string, error) {
 	})
 
 	fmt.Printf("📡 Found %d unique projects.\n", len(roots))
-	return roots, nil
-}
 
-func rankProjectsSequential(projects []string, limit int) ([]string, error) {
 	cache := loadCache()
-	scored := make([]moduleInfo, 0, len(projects))
-
-	for i, path := range projects {
-		score, exists := cache[path]
-		if !exists || score == 0.0 {
-			score = fetchScorecardScore(path)
-			if score > 0.0 {
-				cache[path] = score
-			}
-		}
-
-		fmt.Printf("  [%d/%d] [%3.2f] %s\n", i+1, len(projects), score, path)
-		
-		scored = append(scored, moduleInfo{Path: path, Score: score})
-		
-		time.Sleep(100 * time.Millisecond)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	scored := make([]moduleInfo, 0, len(roots))
+	
+	// Use a worker pool pattern instead of unbounded goroutines
+	numWorkers := 5
+	workChan := make(chan string, len(roots))
+	
+	// Start workers
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go worker(w, workChan, &wg, &mu, &scored, cache)
 	}
 	
+	// Send work
+	for _, p := range roots {
+		workChan <- p
+	}
+	close(workChan)
+	
+	wg.Wait()
 	saveCache(cache)
 
 	sort.Slice(scored, func(i, j int) bool {
@@ -117,7 +108,40 @@ func rankProjectsSequential(projects []string, limit int) ([]string, error) {
 	return results, nil
 }
 
-func fetchScorecardScore(path string) float64 {
+func worker(id int, jobs <-chan string, wg *sync.WaitGroup, mu *sync.Mutex, scored *[]moduleInfo, cache map[string]float64) {
+	defer wg.Done()
+	
+	// Create a separate HTTP client for each worker to avoid connection contention
+	workerClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 2,
+			DisableKeepAlives:   true, // Disable keep-alives to avoid connection sharing issues
+		},
+	}
+	
+	for path := range jobs {
+		score, exists := cache[path]
+		if !exists || score == 0.0 {
+			score = fetchScorecardScoreWithClient(workerClient, path)
+			if score > 0.0 {
+				mu.Lock()
+				cache[path] = score
+				mu.Unlock()
+			}
+		}
+		
+		mu.Lock()
+		*scored = append(*scored, moduleInfo{Path: path, Score: score})
+		fmt.Printf("  [%d] [%3.2f] %s\n", len(*scored), score, path)
+		mu.Unlock()
+		
+		// Small delay to prevent overwhelming the API
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func fetchScorecardScoreWithClient(client *http.Client, path string) float64 {
 	parts := strings.Split(path, "/")
 	if len(parts) < 3 || parts[0] != "github.com" {
 		return 0.0
@@ -128,7 +152,7 @@ func fetchScorecardScore(path string) float64 {
 
 	apiURL := fmt.Sprintf("https://api.securityscorecards.dev/projects/github.com/%s/%s", owner, repo)
 
-	resp, err := httpClient.Get(apiURL)
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return 0.0
 	}
@@ -147,6 +171,11 @@ func fetchScorecardScore(path string) float64 {
 	}
 
 	return result.Score
+}
+
+// Keep the original function for backward compatibility
+func fetchScorecardScore(path string) float64 {
+	return fetchScorecardScoreWithClient(httpClient, path)
 }
 
 func getRootModule(path string) string {
