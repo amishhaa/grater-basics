@@ -1,8 +1,7 @@
 FROM golang:1.25-alpine
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git jq
 
-# Create work directory
 WORKDIR /
 
 COPY runner.sh /runner.sh
