@@ -1,6 +1,9 @@
-FROM golang:1.22-bookworm
+FROM golang:1.25-alpine
 
-WORKDIR /app
+RUN apk add --no-cache git
+
+# Create work directory
+WORKDIR /
 
 COPY runner.sh /runner.sh
 RUN chmod +x /runner.sh

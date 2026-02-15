@@ -12,9 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type Result struct {
+// Updated result struct to include both base and head
+type DualResult struct {
 	Module string `json:"module"`
-	Passed bool   `json:"passed"`
+	Base   bool   `json:"base"`
+	Head   bool   `json:"head"`
 }
 
 var (
@@ -29,7 +31,6 @@ var runCmd = &cobra.Command{
 	Short: "Run downstream tests on base and head and detect regressions",
 	RunE: func(cmd *cobra.Command, args []string) error {
 
-		// ✅ Use current working directory (project root)
 		projectRoot, err := os.Getwd()
 		if err != nil {
 			return err
@@ -66,11 +67,14 @@ var runCmd = &cobra.Command{
 		var allResults []map[string]string
 
 		for _, m := range modules {
-			fmt.Println("Testing:", m)
+			fmt.Println("\n========================================")
+			fmt.Println("Testing module:", m)
+			fmt.Println("========================================")
 
-			baseRes, err := runContainer(image, m, repo, base)
+			// Run ONE container per module that tests both refs
+			dualResult, err := runDualContainer(image, m, repo, base, head)
 			if err != nil {
-				fmt.Println("Base failed:", err)
+				fmt.Printf("❌ Test failed: %v\n", err)
 				allResults = append(allResults, map[string]string{
 					"module": m,
 					"status": "BROKEN",
@@ -78,24 +82,18 @@ var runCmd = &cobra.Command{
 				continue
 			}
 
-			headRes, err := runContainer(image, m, repo, head)
-			if err != nil {
-				fmt.Println("Head failed:", err)
-				allResults = append(allResults, map[string]string{
-					"module": m,
-					"status": "BROKEN",
-				})
-				continue
-			}
-
+			// Determine status based on base and head results
 			status := "PASS"
-			if baseRes.Passed && !headRes.Passed {
+			if dualResult.Base && !dualResult.Head {
 				status = "REGRESSION"
-			} else if !baseRes.Passed {
+			} else if !dualResult.Base {
 				status = "BROKEN"
 			}
+			// else both true -> PASS, both false -> BROKEN (already covered)
 
-			fmt.Printf("%s => %s\n", m, status)
+			fmt.Printf("   Base (%s): %v\n", base, dualResult.Base)
+			fmt.Printf("   Head (%s): %v\n", head, dualResult.Head)
+			fmt.Printf("   Status: %s\n", status)
 
 			allResults = append(allResults, map[string]string{
 				"module": m,
@@ -108,12 +106,14 @@ var runCmd = &cobra.Command{
 	},
 }
 
-func runContainer(image, module, repo, ref string) (Result, error) {
+// runDualContainer runs ONE container that tests both base and head refs
+func runDualContainer(image, module, repo, baseRef, headRef string) (DualResult, error) {
 	cmd := exec.Command(
 		"docker", "run", "--rm",
 		"-e", "MODULE="+module,
 		"-e", "REPO="+repo,
-		"-e", "REF="+ref,
+		"-e", "BASE_REF="+baseRef,
+		"-e", "HEAD_REF="+headRef,
 		image,
 	)
 
@@ -122,12 +122,12 @@ func runContainer(image, module, repo, ref string) (Result, error) {
 	cmd.Stderr = &out
 
 	if err := cmd.Run(); err != nil {
-		return Result{}, fmt.Errorf("container failed: %s", out.String())
+		return DualResult{}, fmt.Errorf("container failed: %s", out.String())
 	}
 
-	var r Result
+	var r DualResult
 	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
-		return Result{}, fmt.Errorf("invalid JSON from container: %s", out.String())
+		return DualResult{}, fmt.Errorf("invalid JSON from container: %s", out.String())
 	}
 
 	return r, nil
