@@ -2,9 +2,17 @@ FROM golang:1.25-alpine
 
 RUN apk add --no-cache git jq
 
+# Create a volume for Go build cache
+VOLUME ["/root/.cache/go-build"]
+
 WORKDIR /
 
 COPY runner.sh /runner.sh
 RUN chmod +x /runner.sh
+
+# Set Go environment for better parallelism
+ENV GO111MODULE=on \
+    GOPROXY=https://proxy.golang.org,direct \
+    GOMAXPROCS=4
 
 ENTRYPOINT ["/runner.sh"]

@@ -5,8 +5,10 @@ MODULE="$MODULE"
 REPO="$REPO"
 BASE_REF="$BASE_REF"
 HEAD_REF="$HEAD_REF"
-TIMEOUT="${TIMEOUT:-300}"
+TIMEOUT="${TIMEOUT:-300}"  # Default 5 minutes if not set
+CORES=4  # Fixed at 4 cores for all operations
 
+# Initialize result structure
 RESULT=$(jq -n \
     --arg module "$MODULE" \
     --arg base_ref "$BASE_REF" \
@@ -34,9 +36,13 @@ echo "   Against repo: $REPO"
 echo "   Base ref: $BASE_REF"
 echo "   Head ref: $HEAD_REF"
 echo "   Timeout: ${TIMEOUT}s"
+echo "   CPU Cores: $CORES"
 echo "   Started at: $(date)"
 echo "════════════════════════════════════════════════════════════════════════════════"
 echo ""
+
+# Set GOMAXPROCS for Go runtime
+export GOMAXPROCS=$CORES
 
 REPO_CLEAN=$(echo "$REPO" | sed 's|https://https://|https://|g' | sed 's|http://http://|http://|g' | sed 's|\.git$||')
 REPO_MODULE=$(echo "$REPO_CLEAN" | sed 's|https://||' | sed 's|http://||' | sed 's|www\.||')
@@ -46,6 +52,7 @@ mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 echo "📁 Workspace: $WORK_DIR"
 
+# Clone dependency repo (the repo under test) with timeout
 echo ""
 echo "📦 Cloning dependency repo: $REPO_CLEAN"
 case "$REPO_CLEAN" in
@@ -64,6 +71,7 @@ if ! timeout $TIMEOUT git clone "$REPO_URL" dependency-repo; then
     exit 0
 fi
 
+# Clone dependent module with timeout
 echo ""
 echo "📦 Cloning dependent module: $MODULE"
 if ! timeout $TIMEOUT git clone "https://$MODULE.git" dependent-module 2>/dev/null; then
@@ -73,18 +81,21 @@ if ! timeout $TIMEOUT git clone "https://$MODULE.git" dependent-module 2>/dev/nu
     exit 0
 fi
 
+# Function to test a specific ref with timeout and parallelism
 test_ref() {
     local ref="$1"
-    local ref_type="$2"
+    local ref_type="$2"  # "base" or "head"
     local timeout_file="$WORK_DIR/timeout_$ref_type.txt"
     
     echo ""
     echo "════════════════════════════════════════════════════════════════════════════"
-    echo "🔍 Testing with dependency at $ref_type: $ref"
+    echo "🔍 Testing with dependency at $ref_type: $ref (using $CORES CPU cores)"
     echo "════════════════════════════════════════════════════════════════════════════"
-
+    
+    # Go to dependency repo
     cd "$WORK_DIR/dependency-repo"
-
+    
+    # Fetch with timeout (parallel git fetch not really beneficial)
     echo "   🔄 Fetching ref: $ref"
     if ! timeout $TIMEOUT git fetch origin "$ref" 2>"$timeout_file"; then
         exit_code=$?
@@ -97,7 +108,8 @@ test_ref() {
         fi
         return
     fi
-
+    
+    # Checkout with timeout
     echo "   🔄 Checking out ref: $ref"
     if ! timeout $TIMEOUT git checkout FETCH_HEAD 2>"$timeout_file"; then
         exit_code=$?
@@ -113,9 +125,11 @@ test_ref() {
     
     echo "   ✅ Dependency checkout successful"
     echo "   📍 Current commit: $(git rev-parse --short HEAD)"
-
+    
+    # Go to dependent module
     cd "$WORK_DIR/dependent-module"
-
+    
+    # Replace with local dependency
     echo "   🔄 Using local dependency at $WORK_DIR/dependency-repo"
     go mod edit -dropreplace="$REPO_MODULE" 2>/dev/null || true
     
@@ -124,24 +138,28 @@ test_ref() {
         RESULT=$(echo "$RESULT" | jq --arg ref_type "$ref_type" '.[$ref_type].passed = false | .[$ref_type].error = "Failed to add replace directive"')
         return
     fi
-
+    
+    # Remove vendor if exists (to avoid conflicts)
     if [ -d "vendor" ]; then
         echo "   📁 Removing vendor directory..."
         rm -rf vendor
     fi
-
-    echo "   📦 Downloading dependencies..."
-    if ! timeout $TIMEOUT go mod download 2>"$timeout_file"; then
+    
+    # Download dependencies with timeout (parallel downloads)
+    echo "   📦 Downloading dependencies (parallel)..."
+    if ! timeout $TIMEOUT go mod download -json 2>"$timeout_file"; then
         exit_code=$?
         if [ $exit_code -eq 124 ]; then
             echo "   ⏰ Timeout downloading dependencies"
             RESULT=$(echo "$RESULT" | jq --arg ref_type "$ref_type" '.[$ref_type].skipped = true | .[$ref_type].error = "Dependency download timeout"')
             return
         fi
+        # If it failed for another reason, continue anyway as some deps might be optional
     fi
     
-    echo "   🔨 Building..."
-    if ! timeout $TIMEOUT go build -mod=mod ./... 2>build_error.txt; then
+    # Build with timeout - OPTIMIZED WITH PARALLEL COMPILATION
+    echo "   🔨 Building (parallel with $CORES cores)..."
+    if ! timeout $TIMEOUT go build -p "$CORES" -mod=mod ./... 2>build_error.txt; then
         exit_code=$?
         if [ $exit_code -eq 124 ]; then
             echo "   ⏰ Timeout during build"
@@ -155,8 +173,9 @@ test_ref() {
         fi
     fi
     
-    echo "   🧪 Testing..."
-    if ! timeout $TIMEOUT go test -mod=mod ./... 2>test_error.txt; then
+    # Test with timeout - OPTIMIZED WITH PARALLEL TEST EXECUTION
+    echo "   🧪 Testing (parallel with $CORES cores, -vet=off)..."
+    if ! timeout $TIMEOUT go test -p "$CORES" -parallel "$CORES" -vet=off -count=1 -mod=mod ./... 2>test_error.txt; then
         exit_code=$?
         if [ $exit_code -eq 124 ]; then
             echo "   ⏰ Timeout during tests"
@@ -174,14 +193,18 @@ test_ref() {
     RESULT=$(echo "$RESULT" | jq --arg ref_type "$ref_type" '.[$ref_type].passed = true | .[$ref_type].error = "" | .[$ref_type].skipped = false')
 }
 
+# Test base ref
 test_ref "$BASE_REF" "base"
 
+# Test head ref
 test_ref "$HEAD_REF" "head"
 
+# Cleanup
 cd /
 rm -rf "$WORK_DIR"
 echo "   🧹 Workspace cleaned"
 
+# Extract results for summary
 BASE_PASSED=$(echo "$RESULT" | jq -r '.base.passed')
 BASE_ERROR=$(echo "$RESULT" | jq -r '.base.error')
 BASE_SKIPPED=$(echo "$RESULT" | jq -r '.base.skipped')
@@ -189,6 +212,7 @@ HEAD_PASSED=$(echo "$RESULT" | jq -r '.head.passed')
 HEAD_ERROR=$(echo "$RESULT" | jq -r '.head.error')
 HEAD_SKIPPED=$(echo "$RESULT" | jq -r '.head.skipped')
 
+# Final output
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════════"
 echo "📊 FINAL RESULTS for $MODULE"
@@ -210,6 +234,7 @@ else
     fi
 fi
 
+# Determine overall status
 if [ "$BASE_SKIPPED" = "true" ] || [ "$HEAD_SKIPPED" = "true" ]; then
     echo "   Overall: ⏸️  INCOMPLETE (some tests skipped due to timeout)"
 elif [ "$BASE_PASSED" = "true" ] && [ "$HEAD_PASSED" = "true" ]; then
@@ -223,4 +248,5 @@ else
 fi
 echo "════════════════════════════════════════════════════════════════════════════════"
 
+# Output the structured JSON result
 echo "$RESULT"

@@ -53,13 +53,13 @@ cd grater-basics</code></pre>
 <p>Creates:</p>
 <pre><code>.grater/modules.txt</code></pre>
 
-<h3>2. Run tests //basic run functionality, currently heavily in development</h3>
+<h3>2. Run tests</h3>
 <pre><code>grater run \
   --repo github.com/open-telemetry/opentelemetry-go \
   --base main \
   --head HEAD</code></pre>
 
-<h3>3. View report (not implemented yet)</h3>
+<h3>3. View report</h3>
 <pre><code>grater report</code></pre>
 
 <h2>Docker runner</h2>

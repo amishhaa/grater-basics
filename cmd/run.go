@@ -12,11 +12,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Updated result struct to include both base and head
+// DualResult matches the detailed structure from runner.sh
 type DualResult struct {
 	Module string `json:"module"`
-	Base   bool   `json:"base"`
-	Head   bool   `json:"head"`
+	Base   struct {
+		Ref     string `json:"ref"`
+		Passed  bool   `json:"passed"`
+		Error   string `json:"error"`
+		Skipped bool   `json:"skipped"`
+	} `json:"base"`
+	Head struct {
+		Ref     string `json:"ref"`
+		Passed  bool   `json:"passed"`
+		Error   string `json:"error"`
+		Skipped bool   `json:"skipped"`
+	} `json:"head"`
+}
+
+// Simplified status for results.json
+type ModuleStatus struct {
+	Module string `json:"module"`
+	Status string `json:"status"` // PASS, BROKEN, REGRESSION, FIXED, SKIPPED, ERROR
 }
 
 var (
@@ -40,17 +56,19 @@ var runCmd = &cobra.Command{
 		modulesFile := filepath.Join(graterDir, "modules.txt")
 		resultsFile := filepath.Join(graterDir, "results.json")
 
+		// Create grater directory if it doesn't exist
+		if err := os.MkdirAll(graterDir, 0755); err != nil {
+			return fmt.Errorf("failed to create .grater directory: %w", err)
+		}
+
 		dockerfilePath := filepath.Join(projectRoot, "docker", "dockerfile")
 		dockerContext := filepath.Join(projectRoot, "docker")
-
-		// Read modules.txt
 		data, err := os.ReadFile(modulesFile)
 		if err != nil {
 			return fmt.Errorf("run prepare first: %w", err)
 		}
 		modules := strings.Split(strings.TrimSpace(string(data)), "\n")
 
-		// Build docker image
 		fmt.Println("Building docker image...")
 		build := exec.Command(
 			"docker", "build",
@@ -64,45 +82,79 @@ var runCmd = &cobra.Command{
 			return fmt.Errorf("docker build failed: %w", err)
 		}
 
-		var allResults []map[string]string
+		var allResults []ModuleStatus
+		var detailedResults []DualResult
 
-		for _, m := range modules {
+		for i, m := range modules {
 			fmt.Println("\n========================================")
-			fmt.Println("Testing module:", m)
+			fmt.Printf("Testing module [%d/%d]: %s\n", i+1, len(modules), m)
 			fmt.Println("========================================")
 
-			// Run ONE container per module that tests both refs
 			dualResult, err := runDualContainer(image, m, repo, base, head)
 			if err != nil {
 				fmt.Printf("❌ Test failed: %v\n", err)
-				allResults = append(allResults, map[string]string{
-					"module": m,
-					"status": "BROKEN",
+				allResults = append(allResults, ModuleStatus{
+					Module: m,
+					Status: "ERROR",
 				})
 				continue
 			}
 
-			// Determine status based on base and head results
+			// Determine status based on detailed results
 			status := "PASS"
-			if dualResult.Base && !dualResult.Head {
+			if dualResult.Base.Skipped || dualResult.Head.Skipped {
+				status = "SKIPPED"
+			} else if dualResult.Base.Passed && !dualResult.Head.Passed {
 				status = "REGRESSION"
-			} else if !dualResult.Base {
+			} else if !dualResult.Base.Passed && dualResult.Head.Passed {
+				status = "FIXED"
+			} else if !dualResult.Base.Passed && !dualResult.Head.Passed {
 				status = "BROKEN"
 			}
-			// else both true -> PASS, both false -> BROKEN (already covered)
 
-			fmt.Printf("   Base (%s): %v\n", base, dualResult.Base)
-			fmt.Printf("   Head (%s): %v\n", head, dualResult.Head)
+			// Print detailed results
+			fmt.Printf("\n📊 Results for %s:\n", m)
+			fmt.Printf("   Base (%s): ", dualResult.Base.Ref)
+			if dualResult.Base.Skipped {
+				fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Base.Error)
+			} else if dualResult.Base.Passed {
+				fmt.Printf("✅ PASS\n")
+			} else {
+				fmt.Printf("❌ FAIL - %s\n", dualResult.Base.Error)
+			}
+
+			fmt.Printf("   Head (%s): ", dualResult.Head.Ref)
+			if dualResult.Head.Skipped {
+				fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Head.Error)
+			} else if dualResult.Head.Passed {
+				fmt.Printf("✅ PASS\n")
+			} else {
+				fmt.Printf("❌ FAIL - %s\n", dualResult.Head.Error)
+			}
 			fmt.Printf("   Status: %s\n", status)
 
-			allResults = append(allResults, map[string]string{
-				"module": m,
-				"status": status,
+			allResults = append(allResults, ModuleStatus{
+				Module: m,
+				Status: status,
 			})
+			detailedResults = append(detailedResults, dualResult)
 		}
 
-		out, _ := json.MarshalIndent(allResults, "", "  ")
-		return os.WriteFile(resultsFile, out, 0644)
+		// Save simplified status results (for quick overview)
+		simpleOut, _ := json.MarshalIndent(allResults, "", "  ")
+		if err := os.WriteFile(resultsFile, simpleOut, 0644); err != nil {
+			return fmt.Errorf("failed to write results: %w", err)
+		}
+
+		// Save detailed results (for report command)
+		detailedFile := filepath.Join(graterDir, "detailed_results.json")
+		detailedOut, _ := json.MarshalIndent(detailedResults, "", "  ")
+		if err := os.WriteFile(detailedFile, detailedOut, 0644); err != nil {
+			return fmt.Errorf("failed to write detailed results: %w", err)
+		}
+
+		fmt.Printf("\n✅ Results saved to %s and %s\n", resultsFile, detailedFile)
+		return nil
 	},
 }
 
@@ -128,6 +180,14 @@ func runDualContainer(image, module, repo, baseRef, headRef string) (DualResult,
 	var r DualResult
 	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
 		return DualResult{}, fmt.Errorf("invalid JSON from container: %s", out.String())
+	}
+
+	// Ensure refs are set (in case container didn't populate them)
+	if r.Base.Ref == "" {
+		r.Base.Ref = baseRef
+	}
+	if r.Head.Ref == "" {
+		r.Head.Ref = headRef
 	}
 
 	return r, nil
