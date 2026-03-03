@@ -74,3 +74,5 @@ docker build -t grater-runner -f docker/Dockerfile .</code></pre>
 </body>
 </html>
 
+grater find --limit 10 --repo go.opentelemetry.io/otel
+grater run --repo https://github.com/open-telemetry/opentelemetry-go.git --base main --head renovate/golang.orgx

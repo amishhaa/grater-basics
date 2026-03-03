@@ -9,35 +9,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Result represents the test result for a single module
-type ModuleResult struct {
+// ModuleStatus is what results.json contains (written by run.go)
+type ModuleStatus struct {
 	Module string `json:"module"`
-	Base   struct {
-		Ref     string `json:"ref"`
-		Passed  bool   `json:"passed"`
-		Error   string `json:"error"`
-		Skipped bool   `json:"skipped"`
-	} `json:"base"`
-	Head struct {
-		Ref     string `json:"ref"`
-		Passed  bool   `json:"passed"`
-		Error   string `json:"error"`
-		Skipped bool   `json:"skipped"`
-	} `json:"head"`
+	Status string `json:"status"` // PASS, BROKEN, REGRESSION, FIXED, SKIPPED, ERROR
 }
 
-// Summary of all results
 type ReportSummary struct {
 	TotalModules int            `json:"total_modules"`
 	BaseRef      string         `json:"base_ref"`
 	HeadRef      string         `json:"head_ref"`
 	Status       string         `json:"status"` // SAFE, UNSAFE, INCONCLUSIVE
-	Regressions  []ModuleResult `json:"regressions,omitempty"`
-	Fixed        []ModuleResult `json:"fixed,omitempty"`
-	Broken       []ModuleResult `json:"broken,omitempty"`
-	Skipped      []ModuleResult `json:"skipped,omitempty"`
-	Passed       []ModuleResult `json:"passed,omitempty"`
-	Errors       []ModuleResult `json:"errors,omitempty"`
+	Regressions  []ModuleStatus `json:"regressions,omitempty"`
+	Fixed        []ModuleStatus `json:"fixed,omitempty"`
+	Broken       []ModuleStatus `json:"broken,omitempty"`
+	Skipped      []ModuleStatus `json:"skipped,omitempty"`
+	Passed       []ModuleStatus `json:"passed,omitempty"`
+	Errors       []ModuleStatus `json:"errors,omitempty"`
 }
 
 var (
@@ -49,14 +37,12 @@ var reportCmd = &cobra.Command{
 	Use:   "report",
 	Short: "Analyze test results and report regressions",
 	Long: `Analyze the results from the 'run' command and generate a report.
-Identifies regressions, fixed issues, and provides a summary of the test run.
 
 Examples:
   grater report                    # Show summary report
   grater report --format json      # Output as JSON
-  grater report --verbose          # Show detailed error messages`,
+  grater report --verbose          # Show detailed output`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Get project root
 		projectRoot, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get working directory: %w", err)
@@ -65,40 +51,33 @@ Examples:
 		graterDir := filepath.Join(projectRoot, ".grater")
 		resultsFile := filepath.Join(graterDir, "results.json")
 
-		// Read results file
 		data, err := os.ReadFile(resultsFile)
 		if err != nil {
 			return fmt.Errorf("no results found. Run 'grater run' first: %w", err)
 		}
 
-		// Parse results
-		var results []ModuleResult
+		var results []ModuleStatus
 		if err := json.Unmarshal(data, &results); err != nil {
-			// Try parsing as single result (backward compatibility)
-			var singleResult ModuleResult
-			if err2 := json.Unmarshal(data, &singleResult); err2 != nil {
-				return fmt.Errorf("failed to parse results.json: %w", err)
-			}
-			results = []ModuleResult{singleResult}
+			return fmt.Errorf("failed to parse results.json: %w", err)
 		}
 
-		// Generate report
-		report := analyzeResults(results)
-
-		// Output report
+		// base and head come from the run command flags
+		report := analyzeResults(results, base, head)
 		return outputReport(report)
 	},
 }
 
-func analyzeResults(results []ModuleResult) ReportSummary {
+func analyzeResults(results []ModuleStatus, baseRef, headRef string) ReportSummary {
 	summary := ReportSummary{
 		TotalModules: len(results),
-		Regressions:  []ModuleResult{},
-		Fixed:        []ModuleResult{},
-		Broken:       []ModuleResult{},
-		Skipped:      []ModuleResult{},
-		Passed:       []ModuleResult{},
-		Errors:       []ModuleResult{},
+		BaseRef:      baseRef,
+		HeadRef:      headRef,
+		Regressions:  []ModuleStatus{},
+		Fixed:        []ModuleStatus{},
+		Broken:       []ModuleStatus{},
+		Skipped:      []ModuleStatus{},
+		Passed:       []ModuleStatus{},
+		Errors:       []ModuleStatus{},
 	}
 
 	if len(results) == 0 {
@@ -106,46 +85,29 @@ func analyzeResults(results []ModuleResult) ReportSummary {
 		return summary
 	}
 
-	// Set refs from first result
-	summary.BaseRef = results[0].Base.Ref
-	summary.HeadRef = results[0].Head.Ref
-
-	// Categorize each module
 	for _, r := range results {
-		// Check for skips first
-		if r.Base.Skipped || r.Head.Skipped {
-			summary.Skipped = append(summary.Skipped, r)
-			continue
-		}
-
-		// Check for errors (failed with error message)
-		if (!r.Base.Passed && r.Base.Error != "") || (!r.Head.Passed && r.Head.Error != "") {
-			summary.Errors = append(summary.Errors, r)
-			continue
-		}
-
-		switch {
-		case r.Base.Passed && r.Head.Passed:
+		switch r.Status {
+		case "PASS":
 			summary.Passed = append(summary.Passed, r)
-
-		case r.Base.Passed && !r.Head.Passed:
+		case "REGRESSION":
 			summary.Regressions = append(summary.Regressions, r)
-
-		case !r.Base.Passed && r.Head.Passed:
+		case "FIXED":
 			summary.Fixed = append(summary.Fixed, r)
-
-		case !r.Base.Passed && !r.Head.Passed:
+		case "BROKEN":
 			summary.Broken = append(summary.Broken, r)
+		case "SKIPPED":
+			summary.Skipped = append(summary.Skipped, r)
+		case "ERROR":
+			summary.Errors = append(summary.Errors, r)
 		}
 	}
 
-	// Determine overall status
 	if len(summary.Regressions) > 0 {
 		summary.Status = "UNSAFE"
-	} else if len(summary.Errors) > 0 {
+	} else if len(summary.Errors) > 0 || len(summary.Skipped) > 0 {
 		summary.Status = "INCONCLUSIVE"
-	} else if len(summary.Broken) == summary.TotalModules {
-		summary.Status = "BROKEN"
+	} else if len(summary.Broken) > 0 && len(summary.Passed) == 0 && len(summary.Fixed) == 0 {
+		summary.Status = "INCONCLUSIVE"
 	} else {
 		summary.Status = "SAFE"
 	}
@@ -156,19 +118,13 @@ func analyzeResults(results []ModuleResult) ReportSummary {
 func outputReport(summary ReportSummary) error {
 	switch outputFormat {
 	case "json":
-		return outputJSON(summary)
-	case "simple":
-		fallthrough
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(summary)
 	default:
 		outputHuman(summary)
 		return nil
 	}
-}
-
-func outputJSON(summary ReportSummary) error {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(summary)
 }
 
 func outputHuman(summary ReportSummary) {
@@ -176,113 +132,72 @@ func outputHuman(summary ReportSummary) {
 	fmt.Println("════════════════════════════════════════════════════════════════════════════════")
 	fmt.Println("📊 GRATER TEST REPORT")
 	fmt.Println("════════════════════════════════════════════════════════════════════════════════")
-	fmt.Printf("Base ref:  %s\n", summary.BaseRef)
-	fmt.Printf("Head ref:  %s\n", summary.HeadRef)
+	fmt.Printf("Base ref:       %s\n", summary.BaseRef)
+	fmt.Printf("Head ref:       %s\n", summary.HeadRef)
 	fmt.Printf("Modules tested: %d\n", summary.TotalModules)
 	fmt.Println()
 
-	// Overall status with color/emoji
 	fmt.Print("Overall Status: ")
 	switch summary.Status {
 	case "SAFE":
-		fmt.Println("✅ SAFE - No regressions detected")
+		fmt.Println("✅ SAFE — no regressions detected")
 	case "UNSAFE":
-		fmt.Println("❌ UNSAFE - Regressions found!")
+		fmt.Println("❌ UNSAFE — regressions found!")
 	case "INCONCLUSIVE":
-		fmt.Println("⚠️  INCONCLUSIVE - Some tests had errors")
-	case "BROKEN":
-		fmt.Println("🔧 BROKEN - All modules are failing")
+		fmt.Println("⚠️  INCONCLUSIVE — some tests errored or were skipped")
 	}
 	fmt.Println()
 
-	// Regressions (most important)
 	if len(summary.Regressions) > 0 {
-		fmt.Println("🔴 REGRESSIONS (base passed, head failed):")
+		fmt.Printf("🔴 REGRESSIONS (%d) — base passed, head failed:\n", len(summary.Regressions))
 		for _, r := range summary.Regressions {
 			fmt.Printf("   • %s\n", r.Module)
-			if verbose && r.Head.Error != "" {
-				fmt.Printf("     Error: %s\n", r.Head.Error)
-			}
 		}
 		fmt.Println()
 	}
 
-	// Fixed issues
 	if len(summary.Fixed) > 0 {
-		fmt.Println("🟢 FIXED (base failed, head passed):")
+		fmt.Printf("🟢 FIXED (%d) — base failed, head passed:\n", len(summary.Fixed))
 		for _, r := range summary.Fixed {
 			fmt.Printf("   • %s\n", r.Module)
-			if verbose && r.Base.Error != "" {
-				fmt.Printf("     Base error: %s\n", r.Base.Error)
-			}
 		}
 		fmt.Println()
 	}
 
-	// Broken modules
 	if len(summary.Broken) > 0 {
-		fmt.Println("🔧 STILL BROKEN (both refs fail):")
+		fmt.Printf("🔧 BROKEN (%d) — both refs fail:\n", len(summary.Broken))
 		for _, r := range summary.Broken {
 			fmt.Printf("   • %s\n", r.Module)
-			if verbose {
-				if r.Base.Error != "" {
-					fmt.Printf("     Base error: %s\n", r.Base.Error)
-				}
-				if r.Head.Error != "" {
-					fmt.Printf("     Head error: %s\n", r.Head.Error)
-				}
-			}
 		}
 		fmt.Println()
 	}
 
-	// Skipped due to timeout
 	if len(summary.Skipped) > 0 {
-		fmt.Println("⏸️  SKIPPED (timeout):")
+		fmt.Printf("⏸️  SKIPPED (%d) — timed out:\n", len(summary.Skipped))
 		for _, r := range summary.Skipped {
 			fmt.Printf("   • %s\n", r.Module)
-			if verbose {
-				if r.Base.Skipped {
-					fmt.Printf("     Base: %s\n", r.Base.Error)
-				}
-				if r.Head.Skipped {
-					fmt.Printf("     Head: %s\n", r.Head.Error)
-				}
-			}
 		}
 		fmt.Println()
 	}
 
-	// Errors
 	if len(summary.Errors) > 0 {
-		fmt.Println("⚠️  ERRORS (test execution failed):")
+		fmt.Printf("⚠️  ERRORS (%d) — container or execution failed:\n", len(summary.Errors))
 		for _, r := range summary.Errors {
 			fmt.Printf("   • %s\n", r.Module)
-			if verbose {
-				if !r.Base.Passed && r.Base.Error != "" {
-					fmt.Printf("     Base: %s\n", r.Base.Error)
-				}
-				if !r.Head.Passed && r.Head.Error != "" {
-					fmt.Printf("     Head: %s\n", r.Head.Error)
-				}
-			}
 		}
 		fmt.Println()
 	}
 
-	// Passing modules (optional, only in verbose)
 	if verbose && len(summary.Passed) > 0 {
-		fmt.Println("✅ PASSING (both refs work):")
+		fmt.Printf("✅ PASSING (%d):\n", len(summary.Passed))
 		for _, r := range summary.Passed {
 			fmt.Printf("   • %s\n", r.Module)
 		}
 		fmt.Println()
 	}
 
-	// Summary counts
 	fmt.Println("════════════════════════════════════════════════════════════════════════════════")
-	fmt.Printf("Summary: %d total | ✅ %d passed | 🔴 %d regressions | 🟢 %d fixed | 🔧 %d broken | ⏸️  %d skipped | ⚠️  %d errors\n",
-		summary.TotalModules,
+	fmt.Printf("✅ %d passed  🔴 %d regressions  🟢 %d fixed  🔧 %d broken  ⏸️  %d skipped  ⚠️  %d errors\n",
 		len(summary.Passed),
 		len(summary.Regressions),
 		len(summary.Fixed),
@@ -292,9 +207,8 @@ func outputHuman(summary ReportSummary) {
 	)
 	fmt.Println("════════════════════════════════════════════════════════════════════════════════")
 
-	// Exit with non-zero status if unsafe
 	if summary.Status == "UNSAFE" {
-		fmt.Println("\n❌ REGRESSIONS DETECTED - Check the report above")
+		fmt.Println("\n❌ REGRESSIONS DETECTED — head ref is not safe to merge")
 		os.Exit(1)
 	}
 }
@@ -302,6 +216,6 @@ func outputHuman(summary ReportSummary) {
 func init() {
 	rootCmd.AddCommand(reportCmd)
 
-	reportCmd.Flags().StringVar(&outputFormat, "format", "simple", "Output format (simple or json)")
-	reportCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed error messages")
+	reportCmd.Flags().StringVar(&outputFormat, "format", "simple", "Output format: simple or json")
+	reportCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show passing modules too")
 }

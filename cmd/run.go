@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -29,11 +31,6 @@ type DualResult struct {
 	} `json:"head"`
 }
 
-// Simplified status for results.json
-type ModuleStatus struct {
-	Module string `json:"module"`
-	Status string `json:"status"` // PASS, BROKEN, REGRESSION, FIXED, SKIPPED, ERROR
-}
 
 var (
 	repo  string
@@ -41,6 +38,44 @@ var (
 	head  string
 	image string
 )
+
+func writeResults(resultsFile, detailedFile string, allResults []ModuleStatus, detailedResults []DualResult) error {
+	simpleOut, err := json.MarshalIndent(allResults, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal results: %w", err)
+	}
+	if err := os.WriteFile(resultsFile, simpleOut, 0644); err != nil {
+		return fmt.Errorf("failed to write results.json: %w", err)
+	}
+
+	detailedOut, err := json.MarshalIndent(detailedResults, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal detailed results: %w", err)
+	}
+	if err := os.WriteFile(detailedFile, detailedOut, 0644); err != nil {
+		return fmt.Errorf("failed to write detailed_results.json: %w", err)
+	}
+
+	return nil
+}
+
+func printSummary(allResults []ModuleStatus) {
+	fmt.Println("\n========================================")
+	fmt.Println("📊 TEST SUMMARY")
+	fmt.Println("========================================")
+	for _, result := range allResults {
+		symbol := map[string]string{
+			"PASS":       "✅",
+			"BROKEN":     "💔",
+			"REGRESSION": "📉",
+			"FIXED":      "🔧",
+			"SKIPPED":    "⏰",
+			"ERROR":      "❌",
+		}[result.Status]
+		fmt.Printf("%s %s: %s\n", symbol, result.Module, result.Status)
+	}
+	fmt.Println("========================================")
+}
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -55,19 +90,39 @@ var runCmd = &cobra.Command{
 		graterDir := filepath.Join(projectRoot, ".grater")
 		modulesFile := filepath.Join(graterDir, "modules.txt")
 		resultsFile := filepath.Join(graterDir, "results.json")
+		detailedFile := filepath.Join(graterDir, "detailed_results.json")
 
-		// Create grater directory if it doesn't exist
 		if err := os.MkdirAll(graterDir, 0755); err != nil {
 			return fmt.Errorf("failed to create .grater directory: %w", err)
 		}
 
+		if _, err := os.Stat(modulesFile); os.IsNotExist(err) {
+			return fmt.Errorf("modules.txt not found. Run 'grater prepare' first: %w", err)
+		}
+
 		dockerfilePath := filepath.Join(projectRoot, "docker", "dockerfile")
 		dockerContext := filepath.Join(projectRoot, "docker")
+
+		if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
+			return fmt.Errorf("dockerfile not found at %s", dockerfilePath)
+		}
+
 		data, err := os.ReadFile(modulesFile)
 		if err != nil {
-			return fmt.Errorf("run prepare first: %w", err)
+			return fmt.Errorf("failed to read modules.txt: %w", err)
 		}
-		modules := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+		rawModules := strings.Split(string(data), "\n")
+		var modules []string
+		for _, m := range rawModules {
+			if trimmed := strings.TrimSpace(m); trimmed != "" {
+				modules = append(modules, trimmed)
+			}
+		}
+
+		if len(modules) == 0 {
+			return fmt.Errorf("no modules found in modules.txt")
+		}
 
 		fmt.Println("Building docker image...")
 		build := exec.Command(
@@ -85,6 +140,21 @@ var runCmd = &cobra.Command{
 		var allResults []ModuleStatus
 		var detailedResults []DualResult
 
+		// Handle Ctrl+C: save whatever completed so far then exit
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Println("\n\n⚠️  Interrupted — saving partial results...")
+			if err := writeResults(resultsFile, detailedFile, allResults, detailedResults); err != nil {
+				fmt.Printf("❌ Failed to save partial results: %v\n", err)
+			} else {
+				fmt.Printf("💾 Partial results saved to %s\n", graterDir)
+				printSummary(allResults)
+			}
+			os.Exit(1)
+		}()
+
 		for i, m := range modules {
 			fmt.Println("\n========================================")
 			fmt.Printf("Testing module [%d/%d]: %s\n", i+1, len(modules), m)
@@ -92,73 +162,70 @@ var runCmd = &cobra.Command{
 
 			dualResult, err := runDualContainer(image, m, repo, base, head)
 			if err != nil {
-				fmt.Printf("❌ Test failed: %v\n", err)
-				allResults = append(allResults, ModuleStatus{
-					Module: m,
-					Status: "ERROR",
-				})
-				continue
-			}
-
-			// Determine status based on detailed results
-			status := "PASS"
-			if dualResult.Base.Skipped || dualResult.Head.Skipped {
-				status = "SKIPPED"
-			} else if dualResult.Base.Passed && !dualResult.Head.Passed {
-				status = "REGRESSION"
-			} else if !dualResult.Base.Passed && dualResult.Head.Passed {
-				status = "FIXED"
-			} else if !dualResult.Base.Passed && !dualResult.Head.Passed {
-				status = "BROKEN"
-			}
-
-			// Print detailed results
-			fmt.Printf("\n📊 Results for %s:\n", m)
-			fmt.Printf("   Base (%s): ", dualResult.Base.Ref)
-			if dualResult.Base.Skipped {
-				fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Base.Error)
-			} else if dualResult.Base.Passed {
-				fmt.Printf("✅ PASS\n")
+				fmt.Printf("❌ Container error: %v\n", err)
+				errorResult := DualResult{Module: m}
+				errorResult.Base.Ref = base
+				errorResult.Head.Ref = head
+				errorResult.Base.Error = err.Error()
+				errorResult.Head.Error = err.Error()
+				errorResult.Base.Skipped = true
+				errorResult.Head.Skipped = true
+				allResults = append(allResults, ModuleStatus{Module: m, Status: "ERROR"})
+				detailedResults = append(detailedResults, errorResult)
 			} else {
-				fmt.Printf("❌ FAIL - %s\n", dualResult.Base.Error)
+				status := "PASS"
+				if dualResult.Base.Skipped || dualResult.Head.Skipped {
+					status = "SKIPPED"
+				} else if dualResult.Base.Passed && !dualResult.Head.Passed {
+					status = "REGRESSION"
+				} else if !dualResult.Base.Passed && dualResult.Head.Passed {
+					status = "FIXED"
+				} else if !dualResult.Base.Passed && !dualResult.Head.Passed {
+					status = "BROKEN"
+				}
+
+				fmt.Printf("\n📊 Results for %s:\n", m)
+				fmt.Printf("   Base (%s): ", dualResult.Base.Ref)
+				if dualResult.Base.Skipped {
+					fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Base.Error)
+				} else if dualResult.Base.Passed {
+					fmt.Printf("✅ PASS\n")
+				} else {
+					fmt.Printf("❌ FAIL - %s\n", dualResult.Base.Error)
+				}
+
+				fmt.Printf("   Head (%s): ", dualResult.Head.Ref)
+				if dualResult.Head.Skipped {
+					fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Head.Error)
+				} else if dualResult.Head.Passed {
+					fmt.Printf("✅ PASS\n")
+				} else {
+					fmt.Printf("❌ FAIL - %s\n", dualResult.Head.Error)
+				}
+				fmt.Printf("   Status: %s\n", status)
+
+				allResults = append(allResults, ModuleStatus{Module: m, Status: status})
+				detailedResults = append(detailedResults, dualResult)
 			}
 
-			fmt.Printf("   Head (%s): ", dualResult.Head.Ref)
-			if dualResult.Head.Skipped {
-				fmt.Printf("⏰ SKIPPED - %s\n", dualResult.Head.Error)
-			} else if dualResult.Head.Passed {
-				fmt.Printf("✅ PASS\n")
+			// Incremental save after every module regardless of pass/fail/error
+			if err := writeResults(resultsFile, detailedFile, allResults, detailedResults); err != nil {
+				fmt.Printf("⚠️  Failed to save progress: %v\n", err)
 			} else {
-				fmt.Printf("❌ FAIL - %s\n", dualResult.Head.Error)
+				fmt.Printf("💾 Progress saved [%d/%d]\n", i+1, len(modules))
 			}
-			fmt.Printf("   Status: %s\n", status)
-
-			allResults = append(allResults, ModuleStatus{
-				Module: m,
-				Status: status,
-			})
-			detailedResults = append(detailedResults, dualResult)
 		}
 
-		// Save simplified status results (for quick overview)
-		simpleOut, _ := json.MarshalIndent(allResults, "", "  ")
-		if err := os.WriteFile(resultsFile, simpleOut, 0644); err != nil {
-			return fmt.Errorf("failed to write results: %w", err)
-		}
+		signal.Stop(sigCh)
 
-		// Save detailed results (for report command)
-		detailedFile := filepath.Join(graterDir, "detailed_results.json")
-		detailedOut, _ := json.MarshalIndent(detailedResults, "", "  ")
-		if err := os.WriteFile(detailedFile, detailedOut, 0644); err != nil {
-			return fmt.Errorf("failed to write detailed results: %w", err)
-		}
+		fmt.Printf("\n✅ results.json saved to %s\n", resultsFile)
+		fmt.Printf("✅ detailed_results.json saved to %s\n", detailedFile)
+		printSummary(allResults)
 
-		fmt.Printf("\n✅ Results saved to %s and %s\n", resultsFile, detailedFile)
 		return nil
 	},
 }
 
-// runDualContainer runs ONE container that tests both base and head refs
 func runDualContainer(image, module, repo, baseRef, headRef string) (DualResult, error) {
 	cmd := exec.Command(
 		"docker", "run", "--rm",
@@ -169,20 +236,35 @@ func runDualContainer(image, module, repo, baseRef, headRef string) (DualResult,
 		image,
 	)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		return DualResult{}, fmt.Errorf("container failed: %s", out.String())
+	runErr := cmd.Run()
+
+	// Stream container stderr so logs are visible in the terminal
+	if stderr.Len() > 0 {
+		fmt.Fprintf(os.Stderr, "%s", stderr.String())
+	}
+
+	rawJSON := bytes.TrimSpace(stdout.Bytes())
+
+	if len(rawJSON) == 0 {
+		if runErr != nil {
+			return DualResult{}, fmt.Errorf("container exited with error and produced no JSON: %v", runErr)
+		}
+		return DualResult{}, fmt.Errorf("container produced no JSON output (stdout was empty)")
 	}
 
 	var r DualResult
-	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
-		return DualResult{}, fmt.Errorf("invalid JSON from container: %s", out.String())
+	if err := json.Unmarshal(rawJSON, &r); err != nil {
+		return DualResult{}, fmt.Errorf("failed to parse container JSON: %v\nraw output: %s", err, string(rawJSON))
 	}
 
-	// Ensure refs are set (in case container didn't populate them)
+	if r.Module == "" {
+		r.Module = module
+	}
 	if r.Base.Ref == "" {
 		r.Base.Ref = baseRef
 	}
